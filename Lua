@@ -1,0 +1,372 @@
+--[[
+    Farm Hub — IncrementalUi v5.1.0 + Cloudflare Key System
+]]
+
+-- 1. Load the UI Library from GitHub
+local LIB_URL = "https://raw.githubusercontent.com/diegoawan/IncrementalUi/refs/heads/main/Lua"
+local success, UI = pcall(function()
+    return loadstring(game:HttpGet(LIB_URL))()
+end)
+
+if not success or type(UI) ~= "table" then
+    warn("[Error] Failed to load IncrementalUi Library. Make sure your GitHub has the v5.1.0 code.")
+    return
+end
+
+-- ============================================================
+-- 2. CLOUDFLARE KEY VERIFICATION
+-- ============================================================
+local HttpService = game:GetService("HttpService")
+
+local VERIFY_URL = "https://incrementalui-keys.diegoawan23.workers.dev/verify"
+local GET_KEY_URL = "https://diegoawan.github.io/IncrementalUiGetKey/"
+
+local requestFunction =
+    (syn and syn.request)
+    or (http and http.request)
+    or http_request
+    or request
+
+local function verifyCloudflareKey(key)
+    if type(key) ~= "string" or key == "" then
+        return false, "Please enter a key."
+    end
+
+    if not requestFunction then
+        return false, "Your executor does not support HTTP requests."
+    end
+
+    local success, response = pcall(function()
+        return requestFunction({
+            Url = VERIFY_URL,
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json"
+            },
+            Body = HttpService:JSONEncode({
+                key = key
+            })
+        })
+    end)
+
+    if not success or type(response) ~= "table" then
+        warn("[FarmHub] Cloudflare request failed:", response)
+        return false, "Could not connect to the key server."
+    end
+
+    local statusCode = response.StatusCode or response.Status
+    if statusCode ~= 200 then
+        warn("[FarmHub] HTTP error:", statusCode)
+        return false, "Key server returned an error."
+    end
+
+    local decodeSuccess, data = pcall(function()
+        return HttpService:JSONDecode(response.Body or "")
+    end)
+
+    if not decodeSuccess or type(data) ~= "table" then
+        return false, "Invalid response from key server."
+    end
+
+    if data.valid == true then
+        return true, "Key successfully verified!"
+    end
+
+    return false, data.message or "Invalid, expired or revoked key."
+end
+
+-- ============================================================
+-- 3. KEY SYSTEM & FARM HUB SCRIPT
+-- ============================================================
+UI:CreateKeySystem({
+    Theme = "GreyWhite",
+    GetKeyLink = GET_KEY_URL,
+    Verify = verifyCloudflareKey,
+
+    OnSuccess = function()
+        local Players = game:GetService("Players")
+        local plr = Players.LocalPlayer
+        
+        -- Added 5s timeout so it doesn't hang forever if Remotes folder is missing
+        local Remotes = game:GetService("ReplicatedStorage"):WaitForChild("Remotes", 5)
+        local PerformAction = Remotes and Remotes:WaitForChild("PerformAction", 5)
+        
+        local Window = UI:CreateWindow({
+            Name = "🌱 Farm Hub",
+            Subtitle = "v1.0",
+            Theme = "GreyWhite",
+            Keybind = Enum.KeyCode.RightControl,
+        })
+
+        local MainTab = Window:CreateTab("Main")
+        local UpgradesTab = Window:CreateTab("Upgrades")
+        local EventsTab = Window:CreateTab("Events")
+
+        local States = {
+            MovementMode = "TP",
+            LoopSpeed = 0.1,
+            CrankMinutes = 1.0,
+            
+            AutoSell = false, AutoCollectBall = false,
+            AutoDig = false, AutoMold = false, AutoDry = false, AutoPolish = false,
+            AutoCrank = false,
+            AutoSilverEvent = false, AutoMoneyEvent = false
+        }
+
+        -- ============================================================
+        -- PLOT AUTO-DETECTION
+        -- ============================================================
+        local function getMyPlot()
+            local plotsFolder = workspace:FindFirstChild("Plots")
+            if not plotsFolder then return nil end
+            
+            for _, plot in ipairs(plotsFolder:GetChildren()) do
+                local nameplate = plot:FindFirstChild("Nameplate")
+                local ownerPlate = nameplate and nameplate:FindFirstChild("OwnerNameplate")
+                local owner = ownerPlate and ownerPlate:FindFirstChild("Owner")
+                
+                if owner and owner:IsA("TextLabel") then
+                    if owner.ContentText == plr.Name or owner.ContentText == plr.DisplayName then
+                        return plot
+                    end
+                end
+            end
+            return plotsFolder:FindFirstChild("Plot1")
+        end
+
+        -- ============================================================
+        -- HELPER: Walk & Interact
+        -- ============================================================
+        local function moveToAndInteract(plot, path, promptName)
+            local pad = plot
+            for _, name in ipairs(path) do
+                pad = pad and pad:FindFirstChild(name)
+            end
+            if not pad then return end
+
+            local char = plr.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if not hrp or not hum or hum.Health <= 0 then return end
+
+            if States.MovementMode == "TP" then
+                if (hrp.Position - pad.Position).Magnitude > 5 then
+                    hrp.CFrame = pad.CFrame + Vector3.new(0, 3, 0)
+                    task.wait(0.1)
+                end
+            elseif States.MovementMode == "Walk" then
+                local dist = (hrp.Position - pad.Position).Magnitude
+                if dist > 8 then
+                    hum:MoveTo(pad.Position)
+                    local startTime = tick()
+                    while (hrp.Position - pad.Position).Magnitude > 6 and tick() - startTime < 4 do
+                        task.wait(0.1)
+                    end
+                    hum:MoveTo(hrp.Position)
+                end
+            end
+
+            local prompt = pad:FindFirstChild(promptName, true) or pad:FindFirstChildOfClass("ProximityPrompt")
+            if prompt and prompt.Enabled then
+                pcall(function() fireproximityprompt(prompt) end)
+            end
+        end
+
+        -- ============================================================
+        -- HELPER: Parse Time
+        -- ============================================================
+        local function parseTime(str)
+            if not str then return math.huge end
+            local mins, secs = string.match(str, "(%d+):(%d+)")
+            if mins then return (tonumber(mins) * 60) + tonumber(secs) end
+            local justSecs = string.match(str, "(%d+)")
+            if justSecs then return tonumber(justSecs) end
+            return math.huge
+        end
+
+        -- ============================================================
+        -- MAIN TAB UI
+        -- ============================================================
+        local SettingsSection = MainTab:CreateSection("Settings")
+        SettingsSection:CreateDropdown({
+            Name = "Movement Mode",
+            Options = {"TP", "Walk"},
+            CurrentOption = "TP",
+            Callback = function(opt) States.MovementMode = opt end
+        })
+        SettingsSection:CreateSlider({
+            Name = "Loop Delay",
+            Range = {0.1, 2}, Increment = 0.1, CurrentValue = 0.1, Suffix = "s",
+            Callback = function(v) States.LoopSpeed = v end
+        })
+
+        local MainSection = MainTab:CreateSection("Farm Automation")
+        MainSection:CreateToggle({ Name = "Auto Dig", CurrentValue = false, Callback = function(v) States.AutoDig = v end })
+        MainSection:CreateToggle({ Name = "Auto Mold", CurrentValue = false, Callback = function(v) States.AutoMold = v end })
+        MainSection:CreateToggle({ Name = "Auto Dry", CurrentValue = false, Callback = function(v) States.AutoDry = v end })
+        MainSection:CreateToggle({ Name = "Auto Polish", CurrentValue = false, Callback = function(v) States.AutoPolish = v end })
+        MainSection:CreateToggle({ Name = "Auto Sell", CurrentValue = false, Callback = function(v) States.AutoSell = v end })
+        MainSection:CreateToggle({ Name = "Auto Collect Ball", CurrentValue = false, Callback = function(v) States.AutoCollectBall = v end })
+        
+        local CrankSection = MainTab:CreateSection("Generator")
+        CrankSection:CreateSlider({
+            Name = "Crank when time < (Minutes)",
+            Range = {0.1, 5}, Increment = 0.1, CurrentValue = 1.0,
+            Callback = function(v) States.CrankMinutes = v end
+        })
+        CrankSection:CreateToggle({ Name = "Auto Crank", CurrentValue = false, Callback = function(v) States.AutoCrank = v end })
+
+        -- ============================================================
+        -- MASTER LOOP
+        -- ============================================================
+        task.spawn(function()
+            while task.wait(States.LoopSpeed) do
+                local anyOn = States.AutoDig or States.AutoMold or States.AutoDry or States.AutoPolish or States.AutoSell or States.AutoCollectBall or States.AutoCrank
+                
+                if anyOn then
+                    local plot = getMyPlot()
+                    if plot then
+                        -- Execute in strict order
+                        if States.AutoDig then 
+                            if PerformAction then pcall(function() PerformAction:FireServer("Dig") end) end
+                            moveToAndInteract(plot, {"DigSite", "DigPad"}, "DigPrompt") 
+                            task.wait(0.05)
+                        end
+                        
+                        if States.AutoMold then 
+                            if PerformAction then pcall(function() PerformAction:FireServer("Mold") end) end
+                            moveToAndInteract(plot, {"Trough", "MoldPad"}, "MoldPrompt") 
+                            task.wait(0.05)
+                        end
+                        
+                        if States.AutoDry then 
+                            if PerformAction then pcall(function() PerformAction:FireServer("RevealClosed") end) end
+                            moveToAndInteract(plot, {"Rack", "DryPad"}, "ProximityPrompt") 
+                            task.wait(0.05)
+                        end
+                        
+                        if States.AutoPolish then 
+                            if PerformAction then pcall(function() PerformAction:FireServer("Polish") end) end
+                            moveToAndInteract(plot, {"Bench", "PolishPad"}, "PolishPrompt") 
+                            task.wait(0.05)
+                        end
+                        
+                        if States.AutoSell then 
+                            moveToAndInteract(plot, {"Vendor", "SellPad"}, "SellPrompt") 
+                            task.wait(0.05)
+                        end
+
+                        if States.AutoCollectBall then
+                            moveToAndInteract(plot, {"PolishTable", "PromptAnchor"}, "PolishTablePrompt")
+                            task.wait(0.05)
+                        end
+                        
+                        -- Crank Logic
+                        if States.AutoCrank then
+                            local generator = plot:FindFirstChild("Generator")
+                            local body = generator and generator:FindFirstChild("Body")
+                            local gui = body and body:FindFirstChild("BillboardGui")
+                            
+                            if gui then
+                                local textLabel = gui:GetChildren()[2]
+                                if textLabel and textLabel:IsA("TextLabel") then
+                                    local timeLeftSeconds = parseTime(textLabel.Text)
+                                    local thresholdSeconds = States.CrankMinutes * 60
+                                    
+                                    if timeLeftSeconds <= thresholdSeconds then
+                                        print("[FarmHub] Cranking Generator. Time left:", textLabel.Text)
+                                        moveToAndInteract(plot, {"Generator", "PromptAnchor"}, "GeneratorPrompt")
+                                        task.wait(0.2)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+
+        -- ============================================================
+        -- UPGRADES TAB
+        -- ============================================================
+        local UpSection = UpgradesTab:CreateSection("Coming Soon")
+        UpSection:CreateButton({
+            Name = "No upgrades available yet!",
+            Callback = function()
+                Window:Notify({Title = "Info", Content = "Upgrades will be added soon.", Duration = 3})
+            end
+        })
+
+        -- ============================================================
+        -- EVENTS TAB
+        -- ============================================================
+        local EventSection = EventsTab:CreateSection("World Events")
+        
+        local function runEvent(eventName, toggleState)
+            task.spawn(function()
+                local savedCFrame = nil
+                while toggleState() do
+                    local char = plr.Character
+                    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                    
+                    if hrp then
+                        local eventsFolder = workspace:FindFirstChild("Events")
+                        local eventModel = eventsFolder and eventsFolder:FindFirstChild(eventName)
+                        
+                        if eventModel and eventModel:FindFirstChild("Tile") then
+                            local tile = eventModel.Tile
+                            
+                            if not savedCFrame then
+                                savedCFrame = hrp.CFrame
+                            end
+                            if (hrp.Position - tile.Position).Magnitude > 5 then
+                                hrp.CFrame = tile.CFrame + Vector3.new(0, 5, 0)
+                            end
+                            
+                            local timerFolder = tile:FindFirstChild("MoneyTileTimer")
+                            local timer = timerFolder and timerFolder:FindFirstChild("Timer")
+                            
+                            if timer and timer:IsA("TextLabel") then
+                                if string.find(timer.Text, "0:01") or string.find(timer.Text, "00:01") then
+                                    if savedCFrame then hrp.CFrame = savedCFrame end
+                                    savedCFrame = nil
+                                end
+                            end
+                        else
+                            if savedCFrame then 
+                                hrp.CFrame = savedCFrame 
+                                savedCFrame = nil
+                            end
+                        end
+                    end
+                    task.wait(0.1)
+                end
+            end)
+        end
+
+        EventSection:CreateToggle({
+            Name = "Auto Silver Event",
+            CurrentValue = false,
+            Callback = function(v)
+                States.AutoSilverEvent = v
+                if v then runEvent("SilverMoneyTile", function() return States.AutoSilverEvent end) end
+            end
+        })
+
+        EventSection:CreateToggle({
+            Name = "Auto Money Event",
+            CurrentValue = false,
+            Callback = function(v)
+                States.AutoMoneyEvent = v
+                if v then runEvent("MoneyTile", function() return States.AutoMoneyEvent end) end
+            end
+        })
+        
+        Window:Notify({
+            Title = "Farm Hub Loaded",
+            Content = "Cloudflare Key System active.",
+            Type = "Success",
+            Duration = 5
+        })
+    end
+})
